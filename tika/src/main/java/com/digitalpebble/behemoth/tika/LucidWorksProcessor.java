@@ -32,14 +32,11 @@ import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
 import org.apache.tika.mime.MimeType;
-import org.apache.tika.mime.MimeTypeException;
 import org.apache.tika.mime.MimeTypes;
-import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.DefaultParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
 import org.apache.tika.parser.ParserDecorator;
-import org.apache.tika.parser.html.HtmlMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.ContentHandler;
@@ -88,7 +85,9 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
   protected boolean flattenCompound = false;
   protected boolean addFailedDocs = true;
   protected boolean addOriginalContent = false;
-  protected AutoDetectParser autoDetectParser = new AutoDetectParser();
+  protected Parser defaultParser = TikaConfig.getDefaultConfig().getParser();
+  protected MimeTypes mimetypes = TikaConfig.getDefaultConfig().getMimeRepository();
+  protected Detector detector = TikaConfig.getDefaultConfig().getDetector();
 
   public Configuration getConf() {
     return config;
@@ -103,7 +102,9 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     addFailedDocs = conf.getBoolean("tika.add.failed", true);
     includeImages = conf.getBoolean("tika.images", true);
     addOriginalContent = conf.getBoolean("tika.add.original", false);
-    autoDetectParser.setFallback(ErrorParser.INSTANCE);
+    if (defaultParser instanceof DefaultParser) {
+      ((DefaultParser)defaultParser).setFallback(ErrorParser.INSTANCE);
+    }
   }
 
   public void close() {
@@ -146,11 +147,10 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     String docUrl = inputDoc.getUrl();
     String uniqueKey = "id"; // XXX
     List<BehemothDocument> docs = new LinkedList<BehemothDocument>();
-    CollectingParser parser = new CollectingParser(autoDetectParser, docs,
+    CollectingParser parser = new CollectingParser(defaultParser, detector, mimetypes, docs,
             metadata, batchId, uniqueKey, docUrl, includeImages,
             flattenCompound, addOriginalContent, addFailedDocs);
     context.set(Parser.class, parser);
-    context.set(AutoDetectParser.class, autoDetectParser);
 
     // TODO: How to get any parsing exceptions reported in an admin/user-friendly manner
     if (inputDoc.getContent() != null) {
@@ -173,7 +173,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
           setMetadata(inputDoc, "parsing", "failed: " + sw.toString());
           docs.add(inputDoc);
           if (reporter != null)
-            reporter.getCounter("TIKA", "DOC-FAILED").increment(1);
+            reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
         }
       } finally {
         try {
@@ -189,7 +189,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
       setMetadata(inputDoc, "parsing", "no_data");
       docs.add(inputDoc);
       if (reporter != null)
-        reporter.getCounter("TIKA", "DOC-NO_DATA").increment(1);
+        reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
     }
 
     return (BehemothDocument[])docs.toArray(new BehemothDocument[0]);
@@ -252,6 +252,8 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     List<BehemothDocument> docs;
     Stack<String> nested = new Stack<String>();
     Metadata parentMeta;
+    MimeTypes mimeTypes;
+    Detector detector;
     String uniqueKey;
     String parentUrl;
     String batchId;
@@ -259,11 +261,13 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     boolean images, flatten, addFailedDocs, original;
     ParseContext plainContext = new ParseContext();
     
-    public CollectingParser(AutoDetectParser parser,
+    public CollectingParser(Parser parser, Detector detector, MimeTypes mimeTypes,
             List<BehemothDocument> docs, Metadata parentMeta, String batchId,
             String uniqueKey, String parentUrl, boolean images,
             boolean flatten, boolean original, boolean addFailedDocs) {
       super(parser);
+      this.mimeTypes = mimeTypes;
+      this.detector = detector;
       this.docs = docs;
       this.uniqueKey = uniqueKey;
       this.parentUrl = parentUrl;
@@ -273,7 +277,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
       this.flatten = flatten;
       this.original = original;
       this.addFailedDocs = addFailedDocs;
-      this.plainContext.set(AutoDetectParser.class, parser);
+      this.plainContext.set(Parser.class, parser);
     }
 
     @Override
@@ -334,27 +338,45 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
         }
         // either append to the parent doc or create a sub-doc
         // pity we have to do this twice...
-        AutoDetectParser p = (AutoDetectParser)getWrappedParser();
+        Parser p = getWrappedParser();
         boolean archive = false;
-        Detector d = p.getDetector();
-        MediaType type = d.detect(stream, m);
-        //log.info("MEDIA_TYPE: " + type);
-        if (type != null) {
-          Parser subParser = p.getParsers(context).get(type);
-          if (subParser != null) {
-            //log.info("-subParser: " + subParser.getClass().getName());
-            if (subParser instanceof DefaultParser) {
-              Parser subSub = ((DefaultParser)subParser).getParsers().get(type);
-              //log.info("-subSubParser: " + subSub.getClass().getName());
-              if (subSub != null && subSub.getClass().getName().equals("org.apache.tika.parser.pkg.PackageParser")) {
-                archive = true;
+        if (contentType == null || contentType.trim().length() == 0) {
+          MediaType type = detector.detect(stream, m);
+          // resolve variant types 
+          if (type != null) {
+            contentType = type.getType() + "/" + type.getSubtype();
+            MimeType mimetype = mimeTypes.forName(contentType);
+            if (mimetype != null) {
+              contentType = mimetype.getName();
+            }
+            m.set(Metadata.CONTENT_TYPE, contentType);
+            if (p instanceof DefaultParser) {
+              Parser subParser = ((DefaultParser)p).getParsers(context).get(type);
+              if (subParser != null) {
+                //log.info("-subParser: " + subParser.getClass().getName());
+                if (subParser instanceof DefaultParser) {
+                  Parser subSub = ((DefaultParser)subParser).getParsers().get(type);
+                  //log.info("-subSubParser: " + subSub.getClass().getName());
+                  if (subSub != null && subSub.getClass().getName().equals("org.apache.tika.parser.pkg.PackageParser")) {
+                    archive = true;
+                  }
+                } else if (subParser.getClass().getName().equals("org.apache.tika.parser.pkg.PackageParser")) {
+                  archive = true;
+                }
               }
-            } else if (subParser.getClass().getName().equals("org.apache.tika.parser.pkg.PackageParser")) {
-              archive = true;
             }
           }
         }
-        if (type.toString().equals("application/java-archive")) { // hack to recognize jars
+        if (contentType == null) {
+          contentType = "application/octet-stream";
+        }
+        // check this again - might have changed
+        if (contentType != null && contentType.startsWith("image") && !images) {
+          //log.info("CP skip " + thisUrl + " type " + contentType);
+          return;
+        }
+        //log.info("MEDIA_TYPE: " + type);
+        if (contentType.equals("application/java-archive")) { // hack to recognize jars
           archive = true;
         }
         ContentHandler handler = new LucidBodyContentHandler(out, defaultOutputEncoding);

@@ -17,6 +17,8 @@
 package com.digitalpebble.behemoth.tika;
 
 import com.digitalpebble.behemoth.BehemothDocument;
+import com.digitalpebble.behemoth.DocumentProcessor;
+
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MapReduceBase;
@@ -39,7 +41,7 @@ public class TikaMapper extends MapReduceBase implements
         Mapper<Text, BehemothDocument, Text, BehemothDocument> {
     private static final Logger LOG = LoggerFactory.getLogger(TikaMapper.class);
 
-    protected TikaProcessor processor;
+    protected DocumentProcessor processor;
 
     @Override
     public void map(Text text, BehemothDocument inputDoc,
@@ -58,10 +60,11 @@ public class TikaMapper extends MapReduceBase implements
     public void configure(JobConf job) {
 
         String handlerName = job.get(TikaConstants.TIKA_PROCESSOR_KEY);
+        LOG.info("Configured DocumentProcessor class: " + handlerName);
         if (handlerName != null) {
-            Class handlerClass = job.getClass(handlerName, TikaProcessor.class);
+            Class handlerClass = job.getClass(TikaConstants.TIKA_PROCESSOR_KEY, TikaProcessor.class);
             try {
-                processor = (TikaProcessor) handlerClass.newInstance();
+                processor = (DocumentProcessor) handlerClass.newInstance();
 
             } catch (InstantiationException e) {
                 LOG.error("Exception", e);
@@ -74,6 +77,7 @@ public class TikaMapper extends MapReduceBase implements
         } else {
             processor = new TikaProcessor();
         }
+        LOG.info("Using DocumentProcessor class: " + processor.getClass().getName());
         processor.setConf(job);
     }
 }

@@ -81,7 +81,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
   protected String defaultFieldName = null;
   protected String batchId = null;
   protected ContentHandler dummy = new DefaultHandler();
-  protected boolean includeImages = true;
+  protected boolean includeImages = false;
   protected boolean flattenCompound = false;
   protected boolean addFailedDocs = true;
   protected boolean addOriginalContent = false;
@@ -100,7 +100,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     includeMetadata = conf.getBoolean("tika.metadata", true);
     flattenCompound = conf.getBoolean("tika.flatten", false);
     addFailedDocs = conf.getBoolean("tika.add.failed", true);
-    includeImages = conf.getBoolean("tika.images", true);
+    includeImages = conf.getBoolean("tika.images", false);
     addOriginalContent = conf.getBoolean("tika.add.original", false);
     if (defaultParser instanceof DefaultParser) {
       ((DefaultParser)defaultParser).setFallback(ErrorParser.INSTANCE);
@@ -126,6 +126,12 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
         reporter.getCounter("TIKA", "DOC-NO_DATA").increment(1);
       return new BehemothDocument[]{inputDoc};
     }
+    if (inputDoc.getText() != null) {
+      setMetadata(inputDoc, "parsing", "skipped, already parsed?");
+      if (reporter != null)
+        reporter.getCounter("TIKA", "TEXT ALREADY AVAILABLE").increment(1);
+      return new BehemothDocument[]{inputDoc};
+    }
 
     Metadata metadata = new Metadata();
 
@@ -133,21 +139,27 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     metadata.set(Metadata.CONTENT_LENGTH, Long.toString(len));
 
     // Seed parser's metadata with metadata from content
-    for (Entry<Writable,Writable> e : inputDoc.getMetadata().entrySet()) {
-      metadata.add(e.getKey().toString(), e.getValue().toString());
+    MapWritable docMeta = inputDoc.getMetadata();
+    if (docMeta != null) {
+      for (Entry<Writable,Writable> e : docMeta.entrySet()) {
+        if (e.getValue() != null) {
+          metadata.add(e.getKey().toString(), e.getValue().toString());
+        }
+      }
     }
     ParseContext context = new ParseContext();
     // put the mimetype in the metadata so that Tika can
     // decide which parser to use
     metadata.set(Metadata.CONTENT_TYPE, inputDoc.getContentType());
 
-    if (reporter != null)
+    if (reporter != null && inputDoc.getContentType() != null)
       reporter.getCounter("MIME-TYPE", inputDoc.getContentType())
               .increment(1);
     String docUrl = inputDoc.getUrl();
     String uniqueKey = "id"; // XXX
     List<BehemothDocument> docs = new LinkedList<BehemothDocument>();
-    CollectingParser parser = new CollectingParser(defaultParser, detector, mimetypes, docs,
+    CollectingParser parser = new CollectingParser(defaultParser, detector,
+            mimetypes, reporter, docs,
             metadata, batchId, uniqueKey, docUrl, includeImages,
             flattenCompound, addOriginalContent, addFailedDocs);
     context.set(Parser.class, parser);
@@ -157,13 +169,10 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
       InputStream input = new ByteArrayInputStream(inputDoc.getContent());
       try {
         parser.parse(input, dummy, metadata, context);
-        for (BehemothDocument d : docs) {
-          setMetadata(d, "parsing", "ok");
-          if (reporter != null)
-            reporter.getCounter("TIKA", "DOC-PARSED").increment(1);
-        }
       } catch (Throwable t) {
         LOG.info("Parsing failed for " + inputDoc.getUrl() + ", skipping: " + t.toString());
+        if (reporter != null)
+          reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
         if (addFailedDocs) {
           // add an empty doc with metadata only
           StringWriter sw = new StringWriter();
@@ -172,8 +181,6 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
           pw.flush();
           setMetadata(inputDoc, "parsing", "failed: " + sw.toString());
           docs.add(inputDoc);
-          if (reporter != null)
-            reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
         }
       } finally {
         try {
@@ -184,12 +191,14 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
           //
         }
       }
-    } else if (addFailedDocs) {
-      // add an empty doc with metadata only
-      setMetadata(inputDoc, "parsing", "no_data");
-      docs.add(inputDoc);
+    } else {
+      if (addFailedDocs) {
+        // add an empty doc with metadata only
+        setMetadata(inputDoc, "parsing", "skipped, no content");
+        docs.add(inputDoc);
+      }
       if (reporter != null)
-        reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
+        reporter.getCounter("TIKA", "DOC-NO_DATA").increment(1);
     }
 
     return (BehemothDocument[])docs.toArray(new BehemothDocument[0]);
@@ -253,6 +262,7 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     Stack<String> nested = new Stack<String>();
     Metadata parentMeta;
     MimeTypes mimeTypes;
+    Reporter reporter;
     Detector detector;
     String uniqueKey;
     String parentUrl;
@@ -260,14 +270,17 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
     int count = 0;
     boolean images, flatten, addFailedDocs, original;
     ParseContext plainContext = new ParseContext();
+    private static final byte[] EMPTY_CONTENT = new byte[0];
     
     public CollectingParser(Parser parser, Detector detector, MimeTypes mimeTypes,
+            Reporter reporter,
             List<BehemothDocument> docs, Metadata parentMeta, String batchId,
             String uniqueKey, String parentUrl, boolean images,
             boolean flatten, boolean original, boolean addFailedDocs) {
       super(parser);
       this.mimeTypes = mimeTypes;
       this.detector = detector;
+      this.reporter = reporter;
       this.docs = docs;
       this.uniqueKey = uniqueKey;
       this.parentUrl = parentUrl;
@@ -320,6 +333,8 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
       }
       String contentType = metadata.get(Metadata.CONTENT_TYPE);
       if (contentType != null && contentType.startsWith("image") && !images) {
+//        if (reporter != null)
+//          reporter.getCounter("TIKA", "FILTERED-CONTENT-TYPE").increment(1);
         //log.info("CP skip " + thisUrl + " type " + contentType);
         return;
       }
@@ -372,6 +387,8 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
         }
         // check this again - might have changed
         if (contentType != null && contentType.startsWith("image") && !images) {
+//          if (reporter != null)
+//            reporter.getCounter("TIKA", "FILTERED-CONTENT-TYPE").increment(1);
           //log.info("CP skip " + thisUrl + " type " + contentType);
           return;
         }
@@ -414,7 +431,9 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
           mime = contentType;
         }
         if (mime.startsWith("image") && !images) {
-          //System.err.println("CP skip " + thisUrl + " " + mime);
+//          if (reporter != null)
+//            reporter.getCounter("TIKA", "FILTERED-CONTENT-TYPE").increment(1);
+         //System.err.println("CP skip " + thisUrl + " " + mime);
           return;
         }
         m.set("Content-Type", mime);
@@ -434,13 +453,16 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
   
         // add raw content if requested
         // XXX not supported for now?
-//        if (original) {
-//          doc.addField(FieldMapping.ORIGINAL_CONTENT, cache.toByteArray());
-//        }
+        if (original) {
+          doc.setContent(cache.toByteArray());
+        } else {
+          doc.setContent(EMPTY_CONTENT);
+        }
         // Add the id field, if not already set
+        doc.setUrl(thisUrl.toString());
         // Note: Key will frequently be a URL or at least approximate a URL
         // in appearance, but is not technically required to be a 100% valid URL.
-        if (!doc.getMetadata().containsKey(new Text(uniqueKey))) {
+        if (doc.getMetadata() == null || !doc.getMetadata().containsKey(new Text(uniqueKey))) {
           setMetadata(doc, uniqueKey, thisUrl.toString());
         }
   
@@ -459,18 +481,23 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
         }
         // add parentMeta if doesn't exist
         for (String name : parentMeta.names()) {
-          if (doc.getMetadata().containsKey(new Text(name))) {
+          if (doc.getMetadata() != null && doc.getMetadata().containsKey(new Text(name))) {
             continue;
           }
           for (String v : parentMeta.getValues(name)) {
             addMetadata(doc, name, v);
           }
         }
+        setMetadata(doc, "parsing", "ok");
+        if (reporter != null)
+          reporter.getCounter("TIKA", "DOC-PARSED").increment(1);
         docs.add(doc);
         //System.err.println("LEAVE " + resourceName + " nested: " + nested);
       } catch (Throwable e) {
         if (addFailedDocs) {
           BehemothDocument doc = new BehemothDocument();
+          doc.setUrl(thisUrl.toString());
+          doc.setContent(EMPTY_CONTENT);
           setMetadata(doc, uniqueKey, thisUrl.toString());
           for (String m : metadata.names()) {
             String[] vals = metadata.getValues(m);
@@ -482,12 +509,14 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
           PrintWriter pw = new PrintWriter(sw);
           e.printStackTrace(pw);
           pw.flush();
-          setMetadata(doc, "parsing", "failed: (invalid format?) " + sw.toString());
+          setMetadata(doc, "parsing", "failed: (invalid/unsupported format?) " + sw.toString());
           docs.add(doc);
         } else {
           LOG.warn("Parsing " + thisUrl + " failed: " + e.getMessage());
           return;
         }
+        if (reporter != null)
+          reporter.getCounter("TIKA", "PARSING_ERROR").increment(1);
       } finally {
         nested.pop();
       }

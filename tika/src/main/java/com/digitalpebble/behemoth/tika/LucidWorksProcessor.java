@@ -118,7 +118,8 @@ public class LucidWorksProcessor implements DocumentProcessor, TikaConstants {
   public BehemothDocument[] process(BehemothDocument inputDoc,
                                     Reporter reporter) {
     // check that it has some text or content
-    if (inputDoc.getContent() == null && inputDoc.getText() == null) {
+    if ((inputDoc.getContent() == null || inputDoc.getContent().length == 0) &&
+            (inputDoc.getText() == null || inputDoc.getText().length() == 0)) {
       LOG.info("No content or text for " + inputDoc.getUrl()
               + " skipping");
       setMetadata(inputDoc, "parsing", "skipped, no content");

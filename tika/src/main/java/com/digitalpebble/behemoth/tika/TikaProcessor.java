@@ -83,10 +83,13 @@ public class TikaProcessor implements DocumentProcessor, TikaConstants {
   public BehemothDocument[] process(BehemothDocument inputDoc,
                                     Reporter reporter) {
     // check that it has some text or content
-    if (inputDoc.getContent() == null && inputDoc.getText() == null) {
+    if ((inputDoc.getContent() == null || inputDoc.getContent().length == 0) &&
+        (inputDoc.getText() == null || inputDoc.getText().length() == 0)) {
       LOG.info("No content or text for " + inputDoc.getUrl()
               + " skipping");
       setMetadata(inputDoc, "parsing", "skipped, no content");
+      if (reporter != null)
+        reporter.getCounter("TIKA", "DOC-NO_DATA").increment(1);
       return new BehemothDocument[]{inputDoc};
     }
 
@@ -130,6 +133,8 @@ public class TikaProcessor implements DocumentProcessor, TikaConstants {
     // skip the processing if the input document already has some text
     if (inputDoc.getText() != null) {
       setMetadata(inputDoc, "parsing", "skipped, already processed?");
+      if (reporter != null)
+        reporter.getCounter("TIKA", "TEXT ALREADY AVAILABLE").increment(1);
       return new BehemothDocument[]{inputDoc};
     }
 

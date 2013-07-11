@@ -40,6 +40,8 @@ import java.io.BufferedInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URLDecoder;
 import java.util.Locale;
 import java.util.zip.GZIPInputStream;
 
@@ -63,9 +65,26 @@ public class DirectAccessTikaMapper extends MapReduceBase implements
     public void map(Text path, Text type,
             OutputCollector<Text, BehemothDocument> outputCollector,
             Reporter reporter) throws IOException {
-        Path p = new Path(path.toString());
+        String pathString = path.toString();
+        try {
+          pathString = URLDecoder.decode(path.toString(), "UTF-8");
+        } catch (Exception e) {
+          LOG.warn("Invalid URLEncoded string, file might be inaccessible: " + e.toString());
+          pathString = path.toString();
+        }
+//        try {
+//          URI u = new URI(pathString);
+//          u = u.normalize();
+//          pathString = u.toString();
+//        } catch (Exception e) {
+//          LOG.warn("Invalid URI, file might be inaccessible: " + e.toString());
+//        }
+        Path p = new Path(pathString);
         FileSystem fs = p.getFileSystem(conf);
         if (!fs.exists(p)) {
+          LOG.warn("File could not be found! " + p.toUri());
+          if (reporter != null)
+            reporter.getCounter("TIKA", "NOT_FOUND");
           return;
         }
         String uri = p.toUri().toString();
